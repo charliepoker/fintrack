@@ -1,49 +1,54 @@
-#Build Stage
-FROM python:3.11.7-slim-bookworm AS build
+# Stage 1: Build dependencies
+FROM python:3.9-slim AS builder
 
-# Set the working directory
-WORKDIR /app
+WORKDIR /build
 
 # Install build dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
+RUN apt-get update && apt-get install -y \
     gcc \
+    python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy the requirements file
+# Copy and install requirements
 COPY requirements.txt .
+RUN pip wheel --no-cache-dir --wheel-dir /build/wheels -r requirements.txt
 
-#Install the dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Stage 2: Runtime image
+FROM python:3.9-slim
 
-# Copy the application code
-COPY . .
-
-# Skip tests for now as they're failing
-# RUN pytest tests/
-
-# Production Stage
-FROM python:3.11.7-slim-bookworm
-
-# Create a non-root user
-RUN groupadd -r appuser && useradd -r -g appuser appuser
-
-# Set the working directory
 WORKDIR /app
 
-# Copy only the necessary files from the build stage
-COPY --from=build /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
-COPY --from=build /usr/local/bin /usr/local/bin
-COPY --from=build /app /app
+# Create a non-root user and group
+RUN groupadd -r appuser && useradd -r -g appuser appuser
 
-# Set the ownership of the application directory to the non-root user
-RUN chown -R appuser:appuser /app
+# Install runtime dependencies only
+RUN apt-get update && apt-get install -y \
+    postgresql-client \
+    && rm -rf /var/lib/apt/lists/*
 
-# Switch to the non-root user
-USER appuser
+# Copy wheels from builder stage
+COPY --from=builder /build/wheels /wheels
+RUN pip install --no-cache-dir --no-index --find-links=/wheels/ /wheels/* \
+    && rm -rf /wheels
 
-# Expose port 5000 for external access to the application.
+# Copy application code
+COPY . .
+
+# Create logs directory and set permissions
+RUN mkdir -p logs && \
+    chown -R appuser:appuser /app
+
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV FLASK_APP=app.py
+ENV FLASK_ENV=production
+
+# Expose the port
 EXPOSE 5001
 
-# Define the entry point for the container to run the application with Gunicorn.
-ENTRYPOINT ["gunicorn", "app:app", "--bind", "0.0.0.0:5001"]
+# Switch to non-root user
+USER appuser
+
+# Run with Gunicorn
+CMD ["gunicorn", "--config", "gunicorn_config.py", "wsgi:app"]
